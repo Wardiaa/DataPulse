@@ -1,0 +1,27 @@
+# docker compose up --build
+#   dashboard  -> http://localhost:8501   (bootstraps data + model on first start)
+#   scheduler  -> keeps data fresh and retrains daily (simulator only by default)
+#   mlflow     -> optional experiment UI:  docker compose --profile tracking up   (http://localhost:5000)
+services:
+  dashboard:
+    build: .
+    ports: ["8501:8501"]
+    volumes: [app-data:/app/data, app-models:/app/models]
+
+  scheduler:
+    build: .
+    entrypoint: ["python", "scheduler.py", "--no-remotive"]   # drop the flag to enable the real-data job
+    depends_on: [dashboard]
+    volumes: [app-data:/app/data, app-models:/app/models]
+
+  mlflow:
+    profiles: ["tracking"]
+    image: ghcr.io/mlflow/mlflow:latest
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow/mlflow.db
+    ports: ["5000:5000"]
+    volumes: [mlflow-data:/mlflow]
+
+volumes:
+  app-data:
+  app-models:
+  mlflow-data:
