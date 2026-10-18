@@ -1,0 +1,105 @@
+name: Keep Streamlit app awake
+
+# Streamlit Community Cloud puts free apps to sleep after ~12 hours without a visitor.
+# This opens the app in a real headless browser every 6 hours (a plain HTTP ping does NOT count),
+# clicks the "wake up" button if the app is asleep, and fails (-> GitHub emails you) if it never loads.
+#
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:   # lets you run it by hand from the Actions tab
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Visit the app (wake it if asleep)
+        env:
+          APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+          APP_MARKER: Tech Job Market Intelligence
+        run: |
+          python - <<'PY'
+          """Open a Streamlit Community Cloud app in a real browser so it counts as a visit.
+
+          - If the app is asleep, click the "wake up" button and wait for it to load.
+          - If it is awake, just load it and keep the session open briefly.
+          - Exit code 1 (with a screenshot) if the app never loads, so the workflow fails visibly.
+
+          Configuration (environment variables): APP_URL (required), APP_MARKER, WAKE_TIMEOUT, HOLD_SECONDS
+          """
+          import os
+          import re
+          import sys
+          import time
+
+          from playwright.sync_api import sync_playwright
+
+          APP_URL = os.environ.get("APP_URL", "").strip()
+          if not APP_URL:
+              sys.exit("Set the repository variable STREAMLIT_APP_URL (Settings > Secrets and variables > Actions > Variables)")
+          MARKER = os.environ.get("APP_MARKER", "Tech Job Market Intelligence")  # text shown once the app is up
+          WAKE_TIMEOUT = int(os.environ.get("WAKE_TIMEOUT", "300"))  # seconds to wait for a cold start
+          HOLD_SECONDS = int(os.environ.get("HOLD_SECONDS", "30"))    # keep the session open after load
+
+
+          def app_loaded(page) -> bool:
+              """True once the marker text appears in the page or in any iframe (Streamlit embeds the app in one)."""
+              for frame in page.frames:
+                  try:
+                      if frame.get_by_text(MARKER).count() > 0:
+                          return True
+                  except Exception:
+                      continue
+              return False
+
+
+          def main() -> int:
+              with sync_playwright() as p:
+                  browser = p.chromium.launch()
+                  page = browser.new_page()
+                  page.goto(APP_URL, wait_until="domcontentloaded", timeout=60_000)
+
+                  wake_button = page.get_by_role("button", name=re.compile(r"back up|wake", re.IGNORECASE))
+                  clicked = False
+                  deadline = time.time() + WAKE_TIMEOUT
+                  while time.time() < deadline:
+                      if app_loaded(page):
+                          print(f"App is up ({'woken from sleep' if clicked else 'was already awake'}); "
+                                f"holding session for {HOLD_SECONDS}s")
+                          page.wait_for_timeout(HOLD_SECONDS * 1000)
+                          browser.close()
+                          return 0
+                      if not clicked and wake_button.count() > 0 and wake_button.first.is_visible():
+                          print("App is asleep - clicking the wake-up button")
+                          wake_button.first.click()
+                          clicked = True
+                      page.wait_for_timeout(2000)
+
+                  page.screenshot(path="keep-awake-failure.png", full_page=True)
+                  print(f"ERROR: app did not load within {WAKE_TIMEOUT}s (see screenshot artifact)")
+                  browser.close()
+                  return 1
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
+
+      - name: Keep failure screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keep-awake-failure
+          path: keep-awake-failure.png
+          if-no-files-found: ignore
